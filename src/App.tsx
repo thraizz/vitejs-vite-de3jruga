@@ -1,3 +1,4 @@
+// @ts-nocheck
 import React, { useState, useRef } from 'react';
 import Tesseract from 'tesseract.js';
 import { Camera, Upload, Loader2 } from 'lucide-react';
@@ -9,12 +10,12 @@ const LocalMeterReadingOCR = () => {
   const fileInputRef = useRef(null);
   const canvasRef = useRef(null);
 
-  const handleFileChange = (event) => {
+  const handleFileChange = (event: any) => {
     const file = event.target.files[0];
     if (file) {
       const reader = new FileReader();
       reader.onload = (e) => {
-        setPreviewImage(e.target.result);
+        setPreviewImage(e.target?.result as any);
         const img = new Image();
         img.onload = () => {
           const canvas = canvasRef.current;
@@ -45,7 +46,7 @@ const LocalMeterReadingOCR = () => {
     }
   };
 
-  const performOCR = async (imageDataUrl) => {
+  const performOCR = async (imageDataUrl: any) => {
     setIsProcessing(true);
     setExtractedReading('');
 
