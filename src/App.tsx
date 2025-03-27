@@ -237,7 +237,7 @@ const LocalMeterReadingOCR = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+    <div className="flex items-center justify-center p-4">
       <div className="w-full max-w-md bg-white rounded-xl shadow-lg overflow-hidden">
         <div className="bg-gradient-to-r from-blue-500 to-purple-600 p-6 text-center">
           <h2 className="text-2xl font-bold text-white">Meter Reading OCR</h2>
@@ -254,13 +254,29 @@ const LocalMeterReadingOCR = () => {
           />
 
           {/* Always render video element but hide it when not active */}
-          <video
-            ref={videoRef}
-            playsInline
-            autoPlay
-            muted
-            className={`w-full h-64 object-cover rounded-lg ${!isCameraActive && 'hidden'}`}
-          />
+
+          <div className={`relative z-10 w-full ${!isCameraActive && 'hidden'}`}>
+            <div className="absolute z-10 top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 border-2 border-red-500 rounded w-3/4 h-16 pointer-events-none"></div>
+            <div className="absolute top-0 left-0 right-0 bg-black/70 text-white p-2 text-sm">
+              {debugMessage}
+            </div>
+            <video
+              ref={videoRef}
+              playsInline
+              autoPlay
+              muted
+              className="w-full h-64 object-cover inset-0 z-40 rounded-lg"
+            />
+            <div className="flex justify-center mt-4">
+              <button
+                onClick={captureImage}
+                className="bg-white rounded-full mx-auto p-4 shadow-lg flex items-center space-x-2"
+              >
+                <span className="text-blue-500">Capture</span>
+                <Camera size={24} className="text-blue-500" />
+              </button>
+            </div>
+          </div>
 
           {!previewImage && !isCameraActive ? (
             <div className="space-y-4">
@@ -284,18 +300,7 @@ const LocalMeterReadingOCR = () => {
               </button>
             </div>
           ) : isCameraActive ? (
-            <div className="relative h-64">
-              <div className="absolute top-0 left-0 right-0 bg-black/70 text-white p-2 text-sm">
-                {debugMessage}
-              </div>
-              <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 border-2 border-red-500 rounded w-3/4 h-16 pointer-events-none"></div>
-              <button
-                onClick={captureImage}
-                className="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-white rounded-full p-4 shadow-lg"
-              >
-                <Camera size={24} className="text-blue-500" />
-              </button>
-            </div>
+            <div className="relative" />
           ) : (
             <div className="relative">
               <img
