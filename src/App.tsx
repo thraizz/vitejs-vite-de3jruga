@@ -4,6 +4,8 @@ import Tesseract, { WorkerOptions } from 'tesseract.js';
 
 interface CustomWorkerOptions extends WorkerOptions {
   tessedit_char_whitelist?: string;
+  tessedit_pageseg_mode?: string;
+  tessedit_ocr_engine_mode?: string;
 }
 
 const LocalMeterReadingOCR = () => {
@@ -12,6 +14,7 @@ const LocalMeterReadingOCR = () => {
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
   const [debugMessage, setDebugMessage] = useState<string>('');
+  const [ocrDebug, setOcrDebug] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -207,27 +210,134 @@ const LocalMeterReadingOCR = () => {
     setExtractedReading('');
 
     try {
-      const {
-        data: { text },
-      } = await Tesseract.recognize(imageDataUrl, 'eng', {
-        logger: (m) => console.log(m),
+      // Pre-process the image
+      const img = new Image();
+      await new Promise((resolve) => {
+        img.onload = resolve;
+        img.src = imageDataUrl;
+      });
+
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      // Set canvas dimensions
+      canvas.width = img.width;
+      canvas.height = img.height;
+
+      // Draw the original image
+      ctx.drawImage(img, 0, 0);
+
+      // Calculate the red box dimensions (75% width, fixed height of 64px)
+      const cropWidth = Math.floor(canvas.width * 0.75);
+      const cropHeight = Math.floor(canvas.height * 0.25); // Adjust based on red box height
+      const cropX = Math.floor((canvas.width - cropWidth) / 2);
+      const cropY = Math.floor((canvas.height - cropHeight) / 2);
+
+      // Get the cropped image data
+      const croppedImageData = ctx.getImageData(cropX, cropY, cropWidth, cropHeight);
+
+      // Clear canvas and draw only the cropped portion
+      canvas.width = cropWidth;
+      canvas.height = cropHeight;
+      ctx.putImageData(croppedImageData, 0, 0);
+
+      // Enhanced preprocessing for LCD digits
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+
+      // Enhance contrast specifically for LCD digits
+      for (let i = 0; i < data.length; i += 4) {
+        const brightness = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        const contrast = 3.0; // Higher contrast for LCD
+        const threshold = 160; // Adjusted threshold for LCD
+
+        const adjustedBrightness = contrast * (brightness - 128) + 128;
+        const newValue = adjustedBrightness > threshold ? 255 : 0;
+
+        data[i] = newValue;     // R
+        data[i + 1] = newValue; // G
+        data[i + 2] = newValue; // B
+      }
+
+      ctx.putImageData(imageData, 0, 0);
+
+      // Scale up the image to help with small character detection
+      const scaleFactor = 2.5; // Increased scale factor
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = canvas.width * scaleFactor;
+      tempCanvas.height = canvas.height * scaleFactor;
+      const tempCtx = tempCanvas.getContext('2d');
+      if (!tempCtx) return;
+
+      // Use better scaling algorithm
+      tempCtx.imageSmoothingEnabled = true;
+      tempCtx.imageSmoothingQuality = 'high';
+      tempCtx.drawImage(canvas, 0, 0, tempCanvas.width, tempCanvas.height);
+
+      const processedImageDataUrl = tempCanvas.toDataURL('image/jpeg', 1.0);
+
+      // Configure Tesseract with optimized settings for LCD digits
+      const result = await Tesseract.recognize(processedImageDataUrl, 'eng', {
+        logger: (m) => {
+          if (m.status === 'recognizing text') {
+            setDebugMessage(`OCR Progress: ${Math.round(m.progress * 100)}%`);
+          }
+        },
         tessedit_char_whitelist: '0123456789.',
+        tessedit_pageseg_mode: '7', // Treat the image as a single line of text
+        tessedit_ocr_engine_mode: '1', // Use neural nets mode
       } as CustomWorkerOptions);
 
-      const meterReadingMatch = text.match(/\d{1,4}\.\d{3}/);
-      if (meterReadingMatch) {
-        setExtractedReading(meterReadingMatch[0]);
-      } else {
-        const numericValues = text.match(/\d+\.\d+/g);
-        if (numericValues) {
-          const sortedValues = numericValues.sort(
-            (a, b) => b.length - a.length
-          );
-          setExtractedReading(sortedValues[0]);
-        } else {
-          setExtractedReading('No reading detected');
+      const { text } = result.data;
+      const debugInfo = [];
+      debugInfo.push(`Raw text: ${text}`);
+      debugInfo.push(`Confidence: ${result.data.confidence}%`);
+
+      // Clean up the recognized text
+      const cleanedText = text.replace(/[^\d,.]/g, '');
+      debugInfo.push(`Cleaned text: ${cleanedText}`);
+
+      // Try different patterns to match the meter reading
+      let reading = null;
+
+      // Pattern 1: Look for exact format with comma
+      const pattern1 = cleanedText.match(/(\d{7}),(\d)/);
+      if (pattern1) {
+        reading = `${pattern1[1]},${pattern1[2]}`;
+        debugInfo.push(`Matched exact pattern: ${reading}`);
+      }
+
+      // Pattern 2: Find 8 consecutive digits and insert comma
+      if (!reading) {
+        const pattern2 = cleanedText.match(/(\d{7})(\d)/);
+        if (pattern2) {
+          reading = `${pattern2[1]},${pattern2[2]}`;
+          debugInfo.push(`Matched 8 digits: ${reading}`);
         }
       }
+
+      // Pattern 3: Find 7 digits and look for a following digit
+      if (!reading) {
+        const pattern3 = cleanedText.match(/(\d{7})[,.]?(\d)?/);
+        if (pattern3) {
+          reading = pattern3[2] ? `${pattern3[1]},${pattern3[2]}` : pattern3[1];
+          debugInfo.push(`Matched 7 digits + optional: ${reading}`);
+        }
+      }
+
+      // Format the reading: remove leading zeros
+      if (reading) {
+        const [intPart, decPart] = reading.split(/[,.]/);
+        const formattedInt = intPart.replace(/^0+/, '') || '0';
+        reading = decPart ? `${formattedInt},${decPart}` : formattedInt;
+        debugInfo.push(`Final reading: ${reading}`);
+      }
+
+      setOcrDebug(debugInfo);
+      setExtractedReading(reading || 'No reading detected');
+
     } catch (error) {
       console.error('OCR Error:', error);
       setExtractedReading('Error processing image');
@@ -330,11 +440,19 @@ const LocalMeterReadingOCR = () => {
           )}
 
           {extractedReading && !isProcessing && (
-            <div className="bg-green-50 border border-green-200 p-4 rounded-lg text-center">
-              <span className="text-2xl font-bold text-green-700">
-                {extractedReading}
-              </span>
-              <p className="text-sm text-green-600 mt-2">Meter Reading</p>
+            <div className="space-y-4">
+              <div className="bg-green-50 border border-green-200 p-4 rounded-lg text-center">
+                <span className="text-2xl font-bold text-green-700">
+                  {extractedReading}
+                </span>
+                <p className="text-sm text-green-600 mt-2">Meter Reading</p>
+              </div>
+              <div className="bg-gray-50 border border-gray-200 p-4 rounded-lg">
+                <p className="text-sm font-medium text-gray-700 mb-2">Debug Information:</p>
+                {ocrDebug.map((debug, index) => (
+                  <p key={index} className="text-xs text-gray-600">{debug}</p>
+                ))}
+              </div>
             </div>
           )}
         </div>
