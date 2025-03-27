@@ -1,52 +1,208 @@
-// @ts-nocheck
-import React, { useState, useRef } from 'react';
-import Tesseract from 'tesseract.js';
-import { Camera, Upload, Loader2 } from 'lucide-react';
+import { Camera, Loader2, Upload } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import Tesseract, { WorkerOptions } from 'tesseract.js';
+
+interface CustomWorkerOptions extends WorkerOptions {
+  tessedit_char_whitelist?: string;
+}
 
 const LocalMeterReadingOCR = () => {
-  const [extractedReading, setExtractedReading] = useState('');
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [previewImage, setPreviewImage] = useState(null);
-  const fileInputRef = useRef(null);
-  const canvasRef = useRef(null);
+  const [extractedReading, setExtractedReading] = useState<string>('');
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
+  const [debugMessage, setDebugMessage] = useState<string>('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
-  const handleFileChange = (event: any) => {
-    const file = event.target.files[0];
+  useEffect(() => {
+    if (videoRef.current) {
+      setDebugMessage('Video element initialized');
+    } else {
+      setDebugMessage('Video element not available');
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      // Cleanup: stop the camera stream when component unmounts
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track: MediaStreamTrack) => track.stop());
+      }
+    };
+  }, []);
+
+  const startCamera = async () => {
+    try {
+      setDebugMessage('Starting camera setup...');
+
+      // Wait briefly for video element to be available
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Check if mediaDevices is available
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setDebugMessage('Error: Camera API not available on this device/browser');
+        return;
+      }
+
+      if (!videoRef.current) {
+        setDebugMessage('Error: Video element not available after delay');
+        return;
+      }
+
+      // iOS Safari specific setup
+      const videoElement = videoRef.current;
+      videoElement.setAttribute('autoplay', '');
+      videoElement.setAttribute('muted', '');
+      videoElement.setAttribute('playsinline', '');
+      videoElement.muted = true;
+
+      setDebugMessage('Requesting camera access...');
+
+      // Start with basic constraints for iOS
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' }
+        });
+      } catch (error) {
+        // Check if this is an iOS Safari permission issue
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+
+        if (isIOS && isSafari) {
+          setDebugMessage('Camera access denied. To enable:\n1. Go to Settings > Safari > Camera\n2. Find this website\n3. Set to "Allow"\n\nThen refresh this page.');
+        } else {
+          setDebugMessage('Camera access denied or not available. Please check camera permissions in your browser settings.');
+        }
+        return;
+      }
+
+      setDebugMessage('Camera access granted, setting up video...');
+
+      // Ensure clean state
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+
+      // Set up video stream
+      videoElement.srcObject = stream;
+      streamRef.current = stream;
+
+      setDebugMessage('Stream assigned to video element...');
+
+      // Log stream tracks
+      const tracks = stream.getVideoTracks();
+      setDebugMessage(`Found ${tracks.length} video tracks. Active: ${tracks[0]?.enabled}`);
+
+      // Wait for video to be ready
+      await new Promise<void>((resolve) => {
+        videoElement.onloadedmetadata = async () => {
+          setDebugMessage(`Video dimensions: ${videoElement.videoWidth}x${videoElement.videoHeight}`);
+          try {
+            await videoElement.play();
+            setDebugMessage('Video playback started');
+            resolve();
+          } catch (_playError) {
+            setDebugMessage('Attempting alternate play method...');
+            // iOS sometimes needs a user gesture, we'll handle this in the UI
+            resolve();
+          }
+        };
+
+        videoElement.onerror = () => {
+          setDebugMessage(`Video error: ${videoElement.error?.message || 'Unknown error'}`);
+          resolve();
+        };
+      });
+
+      setIsCameraActive(true);
+      setDebugMessage('Camera initialized');
+
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      setDebugMessage(`Camera error: ${errorMessage}`);
+      setIsCameraActive(false);
+    }
+  };
+
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track: MediaStreamTrack) => track.stop());
+      streamRef.current = null;
+      setIsCameraActive(false);
+    }
+  };
+
+  const captureImage = () => {
+    if (!videoRef.current || !canvasRef.current) return;
+
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Set canvas size to match video dimensions
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    // Draw the current video frame
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    // Convert canvas to data URL and set as preview
+    const imageDataUrl = canvas.toDataURL('image/jpeg');
+    setPreviewImage(imageDataUrl);
+    stopCamera();
+
+    // Process the captured image
+    performOCR(imageDataUrl);
+  };
+
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
     if (file) {
       const reader = new FileReader();
-      reader.onload = (e) => {
-        setPreviewImage(e.target?.result as any);
-        const img = new Image();
-        img.onload = () => {
-          const canvas = canvasRef.current;
-          const ctx = canvas.getContext('2d');
-          canvas.width = img.width;
-          canvas.height = img.height;
+      reader.onload = (e: ProgressEvent<FileReader>) => {
+        const result = e.target?.result;
+        if (typeof result === 'string') {
+          setPreviewImage(result);
+          const img = new Image();
+          img.onload = () => {
+            const canvas = canvasRef.current;
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
 
-          ctx.drawImage(img, 0, 0);
+            canvas.width = img.width;
+            canvas.height = img.height;
 
-          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          const data = imageData.data;
-          for (let i = 0; i < data.length; i += 4) {
-            const brightness =
-              0.34 * data[i] + 0.5 * data[i + 1] + 0.16 * data[i + 2];
-            const threshold = 127;
-            const newValue = brightness > threshold ? 255 : 0;
-            data[i] = newValue;
-            data[i + 1] = newValue;
-            data[i + 2] = newValue;
-          }
-          ctx.putImageData(imageData, 0, 0);
+            ctx.drawImage(img, 0, 0);
 
-          performOCR(canvas.toDataURL());
-        };
-        img.src = e.target.result;
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+            for (let i = 0; i < data.length; i += 4) {
+              const brightness =
+                0.34 * data[i] + 0.5 * data[i + 1] + 0.16 * data[i + 2];
+              const threshold = 127;
+              const newValue = brightness > threshold ? 255 : 0;
+              data[i] = newValue;
+              data[i + 1] = newValue;
+              data[i + 2] = newValue;
+            }
+            ctx.putImageData(imageData, 0, 0);
+
+            performOCR(canvas.toDataURL());
+          };
+          img.src = result;
+        }
       };
       reader.readAsDataURL(file);
     }
   };
 
-  const performOCR = async (imageDataUrl: any) => {
+  const performOCR = async (imageDataUrl: string) => {
     setIsProcessing(true);
     setExtractedReading('');
 
@@ -56,7 +212,7 @@ const LocalMeterReadingOCR = () => {
       } = await Tesseract.recognize(imageDataUrl, 'eng', {
         logger: (m) => console.log(m),
         tessedit_char_whitelist: '0123456789.',
-      });
+      } as CustomWorkerOptions);
 
       const meterReadingMatch = text.match(/\d{1,4}\.\d{3}/);
       if (meterReadingMatch) {
@@ -80,10 +236,6 @@ const LocalMeterReadingOCR = () => {
     }
   };
 
-  const triggerFileInput = () => {
-    fileInputRef.current.click();
-  };
-
   return (
     <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
       <div className="w-full max-w-md bg-white rounded-xl shadow-lg overflow-hidden">
@@ -95,31 +247,70 @@ const LocalMeterReadingOCR = () => {
           <input
             type="file"
             accept="image/*"
+            capture="environment"
             onChange={handleFileChange}
             ref={fileInputRef}
             className="hidden"
           />
 
-          {!previewImage ? (
-            <div
-              onClick={triggerFileInput}
-              className="border-2 border-dashed border-gray-300 rounded-lg p-12 text-center cursor-pointer hover:border-blue-500 transition-colors"
-            >
-              <Camera className="mx-auto mb-4 text-gray-400" size={48} />
-              <p className="text-gray-500">Click to upload meter image</p>
+          {/* Always render video element but hide it when not active */}
+          <video
+            ref={videoRef}
+            playsInline
+            autoPlay
+            muted
+            className={`w-full h-64 object-cover rounded-lg ${!isCameraActive && 'hidden'}`}
+          />
+
+          {!previewImage && !isCameraActive ? (
+            <div className="space-y-4">
+              <p className="text-sm text-gray-600 bg-gray-100 p-2 rounded mb-2">{debugMessage || 'Tap the box below to start camera'}</p>
+              <div
+                onClick={() => {
+                  setDebugMessage('Starting camera from click...');
+                  startCamera();
+                }}
+                className="border-2 border-dashed border-gray-300 rounded-lg p-12 text-center cursor-pointer hover:border-blue-500 transition-colors"
+              >
+                <Camera className="mx-auto mb-4 text-gray-400" size={48} />
+                <p className="text-gray-500">Tap to start camera</p>
+              </div>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full bg-blue-500 text-white rounded-lg p-3 flex items-center justify-center space-x-2 hover:bg-blue-600 transition-colors"
+              >
+                <Upload size={20} />
+                <span>Upload Image</span>
+              </button>
+            </div>
+          ) : isCameraActive ? (
+            <div className="relative h-64">
+              <div className="absolute top-0 left-0 right-0 bg-black/70 text-white p-2 text-sm">
+                {debugMessage}
+              </div>
+              <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 border-2 border-red-500 rounded w-3/4 h-16 pointer-events-none"></div>
+              <button
+                onClick={captureImage}
+                className="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-white rounded-full p-4 shadow-lg"
+              >
+                <Camera size={24} className="text-blue-500" />
+              </button>
             </div>
           ) : (
             <div className="relative">
               <img
-                src={previewImage}
+                src={previewImage || undefined}
                 alt="Preview"
                 className="w-full h-64 object-cover rounded-lg"
               />
               <button
-                onClick={triggerFileInput}
+                onClick={() => {
+                  setPreviewImage(null);
+                  startCamera();
+                }}
                 className="absolute top-2 right-2 bg-white/80 p-2 rounded-full hover:bg-white transition-colors"
               >
-                <Upload size={20} />
+                <Camera size={20} />
               </button>
             </div>
           )}
